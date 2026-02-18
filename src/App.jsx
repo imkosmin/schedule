@@ -125,6 +125,7 @@ function CalendarGrid({ events, overlapLayout, freeIntervals, weekLabel, weekTyp
                         item.group_id.toLowerCase() === preferredGroup.toLowerCase();
                     const freq = item.frequency || 'weekly';
                     const isBiWeekly = freq === 'odd' || freq === 'even';
+                    const typeIcon = item.type === 'lab' ? '★' : item.type === 'proiect' ? '♦' : '';
 
                     return (
                         <div key={idx}
@@ -140,9 +141,8 @@ function CalendarGrid({ events, overlapLayout, freeIntervals, weekLabel, weekTyp
                                 boxShadow: isPref ? '0 0 0 1px #4f46e5' : undefined,
                             }}>
                             <div className="font-bold text-sm truncate leading-tight">
-                                {isBiWeekly && <span className="mr-0.5">★</span>}
+                                {typeIcon && <span className="mr-0.5">{typeIcon}</span>}
                                 {item.subject}
-                                {isPref && <span className="ml-1 text-[10px] text-indigo-600">♦</span>}
                             </div>
                             <div className="flex items-center gap-1 text-xs opacity-90 leading-tight">
                                 <span className="uppercase font-bold tracking-wide">{item.type}</span>
