@@ -86,23 +86,26 @@ function CalendarGrid({ events, overlapLayout, freeIntervals, weekLabel, weekTyp
 
                 {/* Free time overlays */}
                 {DAYS.map((day, dayIdx) => {
-                    const interval = (freeIntervals || {})[day];
-                    if (!interval) return null;
-                    const top = (interval.from - 8) * PX_PER_HOUR;
-                    const height = (interval.to - interval.from) * PX_PER_HOUR;
+                    const raw = (freeIntervals || {})[day];
+                    if (!raw) return null;
+                    const arr = Array.isArray(raw) ? raw : [raw];
                     const dayColWidth = `(100% - 50px) / 5`;
-                    return (
-                        <div key={`free-${day}`} className="absolute pointer-events-none"
-                            style={{
-                                top: `${top}px`, height: `${height}px`,
-                                left: `calc(50px + (${dayColWidth}) * ${dayIdx})`,
-                                width: `calc(${dayColWidth})`,
-                                background: 'repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(245,158,11,0.08) 4px, rgba(245,158,11,0.08) 8px)',
-                                borderLeft: '2px solid rgba(245,158,11,0.25)',
-                                borderRight: '2px solid rgba(245,158,11,0.25)',
-                                zIndex: 5,
-                            }} />
-                    );
+                    return arr.map((interval, ii) => {
+                        const top = (interval.from - 8) * PX_PER_HOUR;
+                        const height = (interval.to - interval.from) * PX_PER_HOUR;
+                        return (
+                            <div key={`free-${day}-${ii}`} className="absolute pointer-events-none"
+                                style={{
+                                    top: `${top}px`, height: `${height}px`,
+                                    left: `calc(50px + (${dayColWidth}) * ${dayIdx})`,
+                                    width: `calc(${dayColWidth})`,
+                                    background: 'repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(245,158,11,0.08) 4px, rgba(245,158,11,0.08) 8px)',
+                                    borderLeft: '2px solid rgba(245,158,11,0.25)',
+                                    borderRight: '2px solid rgba(245,158,11,0.25)',
+                                    zIndex: 5,
+                                }} />
+                        );
+                    });
                 })}
 
                 {/* Event blocks */}
@@ -163,19 +166,37 @@ function CalendarGrid({ events, overlapLayout, freeIntervals, weekLabel, weekTyp
 /* ── Free-time panel for one week ─────────────────────────────── */
 
 function FreeTimePanel({ label, color, intervals, setIntervals }) {
-    const activeCount = Object.keys(intervals).length;
+    const activeCount = Object.values(intervals).reduce((sum, arr) => {
+        const a = Array.isArray(arr) ? arr : [arr];
+        return sum + a.length;
+    }, 0);
 
     const toggleDay = (day) => {
         const next = { ...intervals };
-        if (next[day]) { delete next[day]; } else { next[day] = { from: 8, to: 20 }; }
+        if (next[day]) { delete next[day]; } else { next[day] = [{ from: 8, to: 20 }]; }
         setIntervals(next);
     };
-    const setField = (day, field, value) => {
-        const cur = intervals[day] || { from: 8, to: 20 };
-        const updated = { ...cur, [field]: parseInt(value, 10) };
+    const addInterval = (day) => {
+        const cur = Array.isArray(intervals[day]) ? intervals[day] : [intervals[day] || { from: 8, to: 20 }];
+        if (cur.length >= 2) return;
+        setIntervals({ ...intervals, [day]: [...cur, { from: 14, to: 20 }] });
+    };
+    const removeInterval = (day, idx) => {
+        const cur = Array.isArray(intervals[day]) ? [...intervals[day]] : [intervals[day]];
+        cur.splice(idx, 1);
+        if (cur.length === 0) {
+            const next = { ...intervals }; delete next[day]; setIntervals(next);
+        } else {
+            setIntervals({ ...intervals, [day]: cur });
+        }
+    };
+    const setField = (day, idx, field, value) => {
+        const cur = Array.isArray(intervals[day]) ? [...intervals[day]] : [{ ...intervals[day] }];
+        const updated = { ...cur[idx], [field]: parseInt(value, 10) };
         if (field === 'from' && updated.from >= updated.to) updated.to = Math.min(updated.from + 1, 21);
         if (field === 'to' && updated.to <= updated.from) updated.from = Math.max(updated.to - 1, 8);
-        setIntervals({ ...intervals, [day]: updated });
+        cur[idx] = updated;
+        setIntervals({ ...intervals, [day]: cur });
     };
 
     return (
@@ -193,39 +214,44 @@ function FreeTimePanel({ label, color, intervals, setIntervals }) {
             </div>
             <div className="border rounded-lg overflow-hidden bg-gray-50">
                 {DAYS.map(day => {
-                    const interval = intervals[day];
-                    const isActive = !!interval;
+                    const dayIntervals = intervals[day];
+                    const arr = dayIntervals ? (Array.isArray(dayIntervals) ? dayIntervals : [dayIntervals]) : null;
+                    const isActive = !!arr;
                     return (
-                        <div key={day} className={`flex items-center gap-1.5 px-2 py-1.5 border-b last:border-b-0 transition
-                            ${isActive ? 'bg-amber-50' : ''}`}>
-                            <button onClick={() => toggleDay(day)}
-                                className={`w-[36px] text-[10px] font-bold rounded py-0.5 transition text-center flex-shrink-0
-                                        ${isActive ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'}`}>
-                                {SHORT_DAYS[day]}
-                            </button>
-                            {isActive ? (
-                                <div className="flex items-center gap-1 flex-1 min-w-0">
-                                    <select value={interval.from} onChange={e => setField(day, 'from', e.target.value)}
+                        <div key={day} className={`px-2 py-1.5 border-b last:border-b-0 transition ${isActive ? 'bg-amber-50' : ''}`}>
+                            <div className="flex items-center gap-1.5">
+                                <button onClick={() => toggleDay(day)}
+                                    className={`w-[36px] text-[10px] font-bold rounded py-0.5 transition text-center flex-shrink-0
+                                            ${isActive ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'}`}>
+                                    {SHORT_DAYS[day]}
+                                </button>
+                                {!isActive && <span className="text-[9px] text-gray-400 italic">Click to set</span>}
+                                {isActive && arr.length < 2 && (
+                                    <button onClick={() => addInterval(day)}
+                                        className="ml-auto text-[9px] font-bold text-amber-600 hover:text-amber-800 transition">+ Add</button>
+                                )}
+                            </div>
+                            {isActive && arr.map((iv, idx) => (
+                                <div key={idx} className="flex items-center gap-1 mt-1 pl-[42px]">
+                                    <select value={iv.from} onChange={e => setField(day, idx, 'from', e.target.value)}
                                         className="w-14 text-[10px] p-0.5 border border-gray-300 rounded bg-white">
-                                        {HOUR_OPTIONS.filter(h => h < (interval.to || 21)).map(h => (
+                                        {HOUR_OPTIONS.filter(h => h < (iv.to || 21)).map(h => (
                                             <option key={h} value={h}>{h}:00</option>
                                         ))}
                                     </select>
                                     <span className="text-[9px] text-gray-400">→</span>
-                                    <select value={interval.to} onChange={e => setField(day, 'to', e.target.value)}
+                                    <select value={iv.to} onChange={e => setField(day, idx, 'to', e.target.value)}
                                         className="w-14 text-[10px] p-0.5 border border-gray-300 rounded bg-white">
-                                        {HOUR_OPTIONS.filter(h => h > (interval.from || 8)).map(h => (
+                                        {HOUR_OPTIONS.filter(h => h > (iv.from || 8)).map(h => (
                                             <option key={h} value={h}>{h}:00</option>
                                         ))}
                                     </select>
-                                    <button onClick={() => toggleDay(day)}
+                                    <button onClick={() => removeInterval(day, idx)}
                                         className="ml-auto text-gray-300 hover:text-red-400 transition flex-shrink-0">
                                         <X className="w-3 h-3" />
                                     </button>
                                 </div>
-                            ) : (
-                                <span className="text-[9px] text-gray-400 italic">Click to set</span>
-                            )}
+                            ))}
                         </div>
                     );
                 })}
