@@ -1,701 +1,315 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { universitySchedule } from './data';
-import {
-    groupDataBySubject,
-    generateSchedules,
-    getAvailableSlots,
-    getVisibleSlots,
-    getUniqueGroups,
-    getWeekPair,
-    WEEK_PAIRS,
-    computeOverlapLayout,
-    findHardConflicts,
-    getCurrentWeekInfo,
-} from './SchedulerLogic';
-import { ChevronLeft, ChevronRight, CalendarDays, AlertTriangle, Users, Clock, X, Download, Upload } from 'lucide-react';
+/**
+ * Smart Schedule Optimizer — Core Logic
+ *
+ * Data contract (from data.js):
+ *   subject   : string   e.g. "LFT"
+ *   type      : string   "lab" | "curs" | "proiect"
+ *   day       : string   Romanian ("Luni" … "Vineri")
+ *   start     : number   hour integer, e.g. 12
+ *   end       : number   hour integer, e.g. 14
+ *   room      : string
+ *   weeks     : string   "all" | "s1-7" | "s8-14"
+ *   frequency : string   "weekly" | "odd" | "even"
+ *   group_id  : string
+ */
 
-/* ── Constants ─────────────────────────────────────────────────── */
+// ─── Semester config ─────────────────────────────────────────────
 
-const DAYS = ['Luni', 'Marti', 'Miercuri', 'Joi', 'Vineri'];
-const SHORT_DAYS = { Luni: 'Mon', Marti: 'Tue', Miercuri: 'Wed', Joi: 'Thu', Vineri: 'Fri' };
-const FULL_DAYS = { Luni: 'Monday', Marti: 'Tuesday', Miercuri: 'Wednesday', Joi: 'Thursday', Vineri: 'Friday' };
-const HOURS = Array.from({ length: 13 }, (_, i) => i + 8);
-const HOUR_OPTIONS = Array.from({ length: 14 }, (_, i) => i + 8);
-const PX_PER_HOUR = 40; // smaller blocks for dual view
+const SEMESTER_START = new Date(2026, 1, 23); // Week 1 starts Mon 23 Feb 2026
 
-/* ── Colour palette ──────────────────────────────────────────── */
-
-const PALETTE = [
-    { bg: '#dbeafe', text: '#1e40af', border: '#93c5fd' },
-    { bg: '#f3e8ff', text: '#6b21a8', border: '#c084fc' },
-    { bg: '#d1fae5', text: '#065f46', border: '#6ee7b7' },
-    { bg: '#fef3c7', text: '#92400e', border: '#fcd34d' },
-    { bg: '#ffe4e6', text: '#9f1239', border: '#fda4af' },
-    { bg: '#cffafe', text: '#155e75', border: '#67e8f9' },
-    { bg: '#e0e7ff', text: '#3730a3', border: '#a5b4fc' },
-    { bg: '#fce7f3', text: '#9d174d', border: '#f9a8d4' },
-];
-function colourFor(subject) {
-    let h = 0;
-    for (let i = 0; i < subject.length; i++) h = (h * 31 + subject.charCodeAt(i)) | 0;
-    return PALETTE[Math.abs(h) % PALETTE.length];
+export function getCurrentWeekInfo(today = new Date()) {
+    const diffMs = today.getTime() - SEMESTER_START.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    let weekNum = Math.floor(diffDays / 7) + 1;
+    if (weekNum < 1) weekNum = 1;
+    if (weekNum > 14) weekNum = 14;
+    return { weekNumber: weekNum, isOdd: weekNum % 2 === 1 };
 }
 
-/* ── Helpers ──────────────────────────────────────────────────── */
-
-function fmtTime(t) {
-    if (typeof t === 'number') return `${String(t).padStart(2, '0')}:00`;
-    return t;
-}
-function typeFromKey(key) {
-    const m = key.match(/\(([^)]+)\)$/);
-    return m ? m[1] : '';
-}
-
-/* ── Reusable calendar grid ───────────────────────────────────── */
-
-function CalendarGrid({ events, overlapLayout, freeIntervals, weekLabel, weekType,
-    preferredGroup, accentColor }) {
-    return (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-            {/* Header bar */}
-            <div className={`px-4 py-2 text-sm font-bold border-b ${accentColor}`}>
-                {weekLabel}
-            </div>
-            {/* Day headers */}
-            <div className="grid grid-cols-[50px_repeat(5,1fr)] bg-gray-50 border-b border-gray-200">
-                <div className="p-1.5 text-[10px] font-semibold text-gray-400 text-center border-r border-gray-100">TIME</div>
-                {DAYS.map(d => (
-                    <div key={d} className="p-1.5 text-xs font-bold text-gray-700 text-center border-r border-gray-100 last:border-r-0">
-                        {FULL_DAYS[d]}
-                    </div>
-                ))}
-            </div>
-            {/* Grid body */}
-            <div className="relative" style={{ height: `${HOURS.length * PX_PER_HOUR}px` }}>
-                {/* Hour lines */}
-                {HOURS.map((h, i) => (
-                    <div key={h} className="absolute w-full grid grid-cols-[50px_repeat(5,1fr)]"
-                        style={{ top: `${i * PX_PER_HOUR}px`, height: `${PX_PER_HOUR}px` }}>
-                        <div className="text-[10px] text-gray-400 text-right pr-1.5 pt-0.5 border-r border-gray-100">{h}:00</div>
-                        {DAYS.map(d => (
-                            <div key={d} className="border-b border-gray-100 border-r last:border-r-0" />
-                        ))}
-                    </div>
-                ))}
-
-                {/* Free time overlays */}
-                {DAYS.map((day, dayIdx) => {
-                    const raw = (freeIntervals || {})[day];
-                    if (!raw) return null;
-                    const arr = Array.isArray(raw) ? raw : [raw];
-                    const dayColWidth = `(100% - 50px) / 5`;
-                    return arr.map((interval, ii) => {
-                        const top = (interval.from - 8) * PX_PER_HOUR;
-                        const height = (interval.to - interval.from) * PX_PER_HOUR;
-                        return (
-                            <div key={`free-${day}-${ii}`} className="absolute pointer-events-none"
-                                style={{
-                                    top: `${top}px`, height: `${height}px`,
-                                    left: `calc(50px + (${dayColWidth}) * ${dayIdx})`,
-                                    width: `calc(${dayColWidth})`,
-                                    background: 'repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(245,158,11,0.08) 4px, rgba(245,158,11,0.08) 8px)',
-                                    borderLeft: '2px solid rgba(245,158,11,0.25)',
-                                    borderRight: '2px solid rgba(245,158,11,0.25)',
-                                    zIndex: 5,
-                                }} />
-                        );
-                    });
-                })}
-
-                {/* Event blocks */}
-                {events.map((item, idx) => {
-                    const dayIdx = DAYS.indexOf(item.day);
-                    if (dayIdx === -1) return null;
-                    const startH = typeof item.start === 'number' ? item.start : parseInt(item.start);
-                    const endH = typeof item.end === 'number' ? item.end : parseInt(item.end);
-                    const top = (startH - 8) * PX_PER_HOUR;
-                    const height = (endH - startH) * PX_PER_HOUR;
-
-                    const { col, totalCols } = overlapLayout[idx] || { col: 0, totalCols: 1 };
-                    const dayColWidth = `(100% - 50px) / 5`;
-                    const slotWidth = `(${dayColWidth}) / ${totalCols}`;
-                    const leftCalc = `calc(50px + (${dayColWidth}) * ${dayIdx} + (${slotWidth}) * ${col})`;
-                    const widthCalc = `calc(${slotWidth})`;
-
-                    const c = colourFor(item.subject);
-                    const isPref = preferredGroup !== 'Any' && item.group_id &&
-                        item.group_id.toLowerCase() === preferredGroup.toLowerCase();
-                    const freq = item.frequency || 'weekly';
-                    const isBiWeekly = freq === 'odd' || freq === 'even';
-                    const typeIcon = item.type === 'lab' ? '★' : item.type === 'proiect' ? '♦' : '';
-
-                    return (
-                        <div key={idx}
-                            className="absolute rounded-md shadow-sm flex flex-col justify-center overflow-hidden
-                                        hover:shadow-md hover:brightness-95 transition cursor-default"
-                            style={{
-                                top: `${top + 1}px`, height: `${height - 2}px`,
-                                left: leftCalc, width: widthCalc, zIndex: 10,
-                                padding: '2px 4px',
-                                backgroundColor: isBiWeekly ? 'rgba(255,255,255,0.85)' : c.bg,
-                                color: c.text,
-                                border: `2px ${isBiWeekly ? 'dashed' : 'solid'} ${isPref ? '#4f46e5' : c.border}`,
-                                boxShadow: isPref ? '0 0 0 1px #4f46e5' : undefined,
-                            }}>
-                            <div className="font-bold text-sm truncate leading-tight">
-                                {typeIcon && <span className="mr-0.5">{typeIcon}</span>}
-                                {item.subject}
-                            </div>
-                            <div className="flex items-center gap-1 text-xs opacity-90 leading-tight">
-                                <span className="uppercase font-bold tracking-wide">{item.type}</span>
-                                <span>•</span>
-                                <span className="truncate">{item.room}</span>
-                            </div>
-                            <div className="text-xs opacity-75 leading-tight">
-                                {fmtTime(item.start)}–{fmtTime(item.end)} | Gr: {item.group_id}
-                            </div>
-                        </div>
-                    );
-                })}
-            </div>
-        </div>
-    );
+/**
+ * Return the week pair that `weekNum` belongs to.
+ * Pairs: (1,2) (3,4) (5,6) (7,8) (9,10) (11,12) (13,14).
+ * The first is always odd, the second always even.
+ */
+export function getWeekPair(weekNum) {
+    const oddWeek = weekNum % 2 === 1 ? weekNum : weekNum - 1;
+    const evenWeek = oddWeek + 1;
+    return { oddWeek, evenWeek };
 }
 
-/* ── Free-time panel for one week ─────────────────────────────── */
+/** All 7 week-pair options for the selector. */
+export const WEEK_PAIRS = Array.from({ length: 7 }, (_, i) => {
+    const odd = i * 2 + 1;
+    return { oddWeek: odd, evenWeek: odd + 1 };
+});
 
-function FreeTimePanel({ label, color, intervals, setIntervals }) {
-    const activeCount = Object.values(intervals).reduce((sum, arr) => {
-        const a = Array.isArray(arr) ? arr : [arr];
-        return sum + a.length;
-    }, 0);
+// ─── Week range helpers ──────────────────────────────────────────
 
-    const toggleDay = (day) => {
-        const next = { ...intervals };
-        if (next[day]) { delete next[day]; } else { next[day] = [{ from: 8, to: 20 }]; }
-        setIntervals(next);
-    };
-    const addInterval = (day) => {
-        const cur = Array.isArray(intervals[day]) ? intervals[day] : [intervals[day] || { from: 8, to: 20 }];
-        if (cur.length >= 2) return;
-        setIntervals({ ...intervals, [day]: [...cur, { from: 14, to: 20 }] });
-    };
-    const removeInterval = (day, idx) => {
-        const cur = Array.isArray(intervals[day]) ? [...intervals[day]] : [intervals[day]];
-        cur.splice(idx, 1);
-        if (cur.length === 0) {
-            const next = { ...intervals }; delete next[day]; setIntervals(next);
-        } else {
-            setIntervals({ ...intervals, [day]: cur });
+export function isClassActiveInWeek(weeksStr, currentWeek) {
+    if (!weeksStr || weeksStr === 'all') return true;
+    if (!currentWeek) return true;
+    const str = weeksStr.toLowerCase().replace(/\s/g, '');
+    if (str.includes('-')) {
+        const parts = str.replace('s', '').split('-');
+        if (parts.length === 2) return currentWeek >= parseInt(parts[0], 10) && currentWeek <= parseInt(parts[1], 10);
+    }
+    if (str.includes(',')) return str.split(',').map(p => parseInt(p.replace('s', ''), 10)).includes(currentWeek);
+    if (str.startsWith('s')) return parseInt(str.replace('s', ''), 10) === currentWeek;
+    return true;
+}
+
+/** Is a slot active in at least one of the two weeks of the pair? */
+export function isClassActiveInPair(weeksStr, oddWeek, evenWeek) {
+    return isClassActiveInWeek(weeksStr, oddWeek) || isClassActiveInWeek(weeksStr, evenWeek);
+}
+
+// ─── Time helpers ────────────────────────────────────────────────
+
+export function toMinutes(t) {
+    if (typeof t === 'number') return t * 60;
+    if (!t.includes(':')) return parseInt(t, 10) * 60;
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + (m || 0);
+}
+
+/**
+ * Frequency-aware overlap check.
+ * Two slots with complementary frequencies (odd vs even) NEVER co-occur.
+ */
+function doSlotsOverlap(a, b) {
+    if (a.day !== b.day) return false;
+    if (Math.max(toMinutes(a.start), toMinutes(b.start))
+        >= Math.min(toMinutes(a.end), toMinutes(b.end))) return false;
+    const fa = a.frequency || 'weekly';
+    const fb = b.frequency || 'weekly';
+    if ((fa === 'odd' && fb === 'even') || (fa === 'even' && fb === 'odd')) return false;
+    return true;
+}
+
+// ─── Grouping ────────────────────────────────────────────────────
+
+export function groupDataBySubject(data) {
+    const groups = {};
+    data.forEach(item => {
+        const key = `${item.subject} (${item.type})`;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(item);
+    });
+    return groups;
+}
+
+export function getUniqueGroups(data) {
+    const s = new Set();
+    data.forEach(item => { if (item.group_id) s.add(item.group_id); });
+    return [...s].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+// ─── Availability (pair-aware) ───────────────────────────────────
+
+/** Get slots active in the given week pair. */
+export function getAvailableSlotsForPair(key, groupedData, oddWeek, evenWeek) {
+    return (groupedData[key] || []).filter(s => isClassActiveInPair(s.weeks, oddWeek, evenWeek));
+}
+
+/** Legacy single-week availability (used for N/A badges). */
+export function getAvailableSlots(key, groupedData, currentWeek) {
+    return (groupedData[key] || []).filter(s => isClassActiveInWeek(s.weeks, currentWeek));
+}
+
+/** Filter a schedule to only events visible in a specific week (week range + frequency). */
+export function getVisibleSlots(schedule, week) {
+    const isOdd = week % 2 === 1;
+    return schedule.filter(s => {
+        if (!isClassActiveInWeek(s.weeks, week)) return false;
+        const f = s.frequency || 'weekly';
+        if (f === 'odd') return isOdd;
+        if (f === 'even') return !isOdd;
+        return true;
+    });
+}
+
+// ─── Conflict detection ──────────────────────────────────────────
+
+export function findHardConflicts(selectedKeys, groupedData, oddWeek, evenWeek) {
+    const pairs = [];
+    const involved = new Set();
+    for (let i = 0; i < selectedKeys.length; i++) {
+        const slotsA = getAvailableSlotsForPair(selectedKeys[i], groupedData, oddWeek, evenWeek);
+        if (slotsA.length === 0) continue;
+        for (let j = i + 1; j < selectedKeys.length; j++) {
+            const slotsB = getAvailableSlotsForPair(selectedKeys[j], groupedData, oddWeek, evenWeek);
+            if (slotsB.length === 0) continue;
+            let canCoexist = false;
+            for (const a of slotsA) {
+                for (const b of slotsB) {
+                    if (!doSlotsOverlap(a, b)) { canCoexist = true; break; }
+                }
+                if (canCoexist) break;
+            }
+            if (!canCoexist) {
+                pairs.push({ a: selectedKeys[i], b: selectedKeys[j] });
+                involved.add(selectedKeys[i]);
+                involved.add(selectedKeys[j]);
+            }
         }
-    };
-    const setField = (day, idx, field, value) => {
-        const cur = Array.isArray(intervals[day]) ? [...intervals[day]] : [{ ...intervals[day] }];
-        const updated = { ...cur[idx], [field]: parseInt(value, 10) };
-        if (field === 'from' && updated.from >= updated.to) updated.to = Math.min(updated.from + 1, 21);
-        if (field === 'to' && updated.to <= updated.from) updated.from = Math.max(updated.to - 1, 8);
-        cur[idx] = updated;
-        setIntervals({ ...intervals, [day]: cur });
-    };
-
-    return (
-        <div className="space-y-1">
-            <div className="flex items-center justify-between">
-                <span className={`text-[11px] font-bold ${color}`}>
-                    {label}
-                    {activeCount > 0 && (
-                        <span className="ml-1 text-[9px] bg-amber-100 text-amber-700 px-1 py-0.5 rounded-full">{activeCount}</span>
-                    )}
-                </span>
-                {activeCount > 0 && (
-                    <button onClick={() => setIntervals({})} className="text-[9px] text-gray-400 hover:text-red-500">Clear</button>
-                )}
-            </div>
-            <div className="border rounded-lg overflow-hidden bg-gray-50">
-                {DAYS.map(day => {
-                    const dayIntervals = intervals[day];
-                    const arr = dayIntervals ? (Array.isArray(dayIntervals) ? dayIntervals : [dayIntervals]) : null;
-                    const isActive = !!arr;
-                    return (
-                        <div key={day} className={`px-2 py-1.5 border-b last:border-b-0 transition ${isActive ? 'bg-amber-50' : ''}`}>
-                            <div className="flex items-center gap-1.5">
-                                <button onClick={() => toggleDay(day)}
-                                    className={`w-[36px] text-[10px] font-bold rounded py-0.5 transition text-center flex-shrink-0
-                                            ${isActive ? 'bg-amber-500 text-white' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'}`}>
-                                    {SHORT_DAYS[day]}
-                                </button>
-                                {!isActive && <span className="text-[9px] text-gray-400 italic">Click to set</span>}
-                                {isActive && arr.length < 2 && (
-                                    <button onClick={() => addInterval(day)}
-                                        className="ml-auto text-[9px] font-bold text-amber-600 hover:text-amber-800 transition">+ Add</button>
-                                )}
-                            </div>
-                            {isActive && arr.map((iv, idx) => (
-                                <div key={idx} className="flex items-center gap-1 mt-1 pl-[42px]">
-                                    <select value={iv.from} onChange={e => setField(day, idx, 'from', e.target.value)}
-                                        className="w-14 text-[10px] p-0.5 border border-gray-300 rounded bg-white">
-                                        {HOUR_OPTIONS.filter(h => h < (iv.to || 21)).map(h => (
-                                            <option key={h} value={h}>{h}:00</option>
-                                        ))}
-                                    </select>
-                                    <span className="text-[9px] text-gray-400">→</span>
-                                    <select value={iv.to} onChange={e => setField(day, idx, 'to', e.target.value)}
-                                        className="w-14 text-[10px] p-0.5 border border-gray-300 rounded bg-white">
-                                        {HOUR_OPTIONS.filter(h => h > (iv.from || 8)).map(h => (
-                                            <option key={h} value={h}>{h}:00</option>
-                                        ))}
-                                    </select>
-                                    <button onClick={() => removeInterval(day, idx)}
-                                        className="ml-auto text-gray-300 hover:text-red-400 transition flex-shrink-0">
-                                        <X className="w-3 h-3" />
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
-                    );
-                })}
-            </div>
-        </div>
-    );
+    }
+    return { pairs, involved };
 }
 
-/* ══════════════════════════════════════════════════════════════════
-   ██  Main App
-   ══════════════════════════════════════════════════════════════════ */
+// ─── Schedule generation (pair-aware) ────────────────────────────
 
-function App() {
-    const autoWeek = useMemo(() => getCurrentWeekInfo(), []);
-    const autoPair = useMemo(() => getWeekPair(autoWeek.weekNumber), [autoWeek]);
+const MAX_DISTINCT = 10;
 
-    const [selectedSubjects, setSelectedSubjects] = useState(new Set());
-    const [preferredGroup, setPreferredGroup] = useState('33a');
-    const [selectedPairIdx, setSelectedPairIdx] = useState(
-        WEEK_PAIRS.findIndex(p => p.oddWeek === autoPair.oddWeek)
-    );
-    const [oddFreeIntervals, setOddFreeIntervals] = useState({});
-    const [evenFreeIntervals, setEvenFreeIntervals] = useState({});
-    const [mirrorFreeTime, setMirrorFreeTime] = useState(true);
-    const [schedules, setSchedules] = useState([]);
-    const [skippedKeys, setSkippedKeys] = useState([]);
-    const [conflictPairs, setConflictPairs] = useState([]);
-    const [conflictKeys, setConflictKeys] = useState(new Set());
-    const [schedIdx, setSchedIdx] = useState(0);
-    const [totalFound, setTotalFound] = useState(0);
-    const [busy, setBusy] = useState(false);
-    const [hasGenerated, setHasGenerated] = useState(false);
+function scheduleFingerprint(schedule) {
+    return schedule
+        .map(s => `${s.subject}|${s.type}|${s.day}|${s.start}|${s.end}|${s.frequency || 'weekly'}|${s.group_id || ''}`)
+        .sort()
+        .join(';;');
+}
 
-    const pair = WEEK_PAIRS[selectedPairIdx] || WEEK_PAIRS[0];
-    const { oddWeek, evenWeek } = pair;
+/**
+ * constraints shape:
+ *   {
+ *     oddFreeIntervals:  { Luni: {from:8,to:10}, ... },  // free time in the odd week
+ *     evenFreeIntervals: { Marti: {from:16,to:20}, ... }, // free time in the even week
+ *   }
+ *
+ * A slot violates a constraint if it overlaps with a free interval for the
+ * week type it appears in.  "weekly" slots must satisfy BOTH weeks' constraints.
+ */
+export function generateSchedules(selectedKeys, groupedData, constraints, oddWeek, evenWeek, preferredGroup) {
+    const skipped = [];
+    const activeKeys = [];
 
-    const grouped = useMemo(() => groupDataBySubject(universitySchedule), []);
-    const subjectKeys = useMemo(() => Object.keys(grouped).sort(), [grouped]);
-    const uniqueGroups = useMemo(() => getUniqueGroups(universitySchedule), []);
+    selectedKeys.forEach(key => {
+        const slots = getAvailableSlotsForPair(key, groupedData, oddWeek, evenWeek);
+        if (slots.length === 0) { skipped.push(key); } else { activeKeys.push(key); }
+    });
 
-    // Use oddWeek for availability badge (both weeks of pair are checked in generation)
-    const availability = useMemo(() => {
-        const m = {};
-        subjectKeys.forEach(k => {
-            const oddSlots = getAvailableSlots(k, grouped, oddWeek).length;
-            const evenSlots = getAvailableSlots(k, grouped, evenWeek).length;
-            m[k] = oddSlots + evenSlots;
-        });
-        return m;
-    }, [grouped, subjectKeys, oddWeek, evenWeek]);
+    if (activeKeys.length === 0) return { schedules: [], skipped, totalFound: 0 };
 
-    const allTypes = useMemo(() => {
-        const s = new Set();
-        subjectKeys.forEach(k => s.add(typeFromKey(k)));
-        return [...s].sort();
-    }, [subjectKeys]);
+    const buckets = activeKeys.map(key => getAvailableSlotsForPair(key, groupedData, oddWeek, evenWeek));
+    const allResults = [];
+    const seenFingerprints = new Set();
 
-    useEffect(() => {
-        const init = new Set();
-        subjectKeys.forEach(k => {
-            const t = typeFromKey(k);
-            if (t === 'lab' || t === 'proiect' || t === 'sem') init.add(k);
-        });
-        setSelectedSubjects(init);
-    }, [subjectKeys]);
+    function backtrack(idx, current) {
+        if (idx === buckets.length) {
+            if (!checkUserConstraints(current, constraints)) return;
+            const fp = scheduleFingerprint(current);
+            if (seenFingerprints.has(fp)) return;
+            seenFingerprints.add(fp);
+            allResults.push([...current]);
+            return;
+        }
+        for (const slot of buckets[idx]) {
+            let ok = true;
+            for (const existing of current) {
+                if (doSlotsOverlap(slot, existing)) { ok = false; break; }
+            }
+            if (!ok) continue;
+            current.push(slot);
+            backtrack(idx + 1, current);
+            current.pop();
+        }
+    }
 
-    // Sync even intervals from odd when mirrored
-    useEffect(() => {
-        if (mirrorFreeTime) setEvenFreeIntervals({ ...oddFreeIntervals });
-    }, [mirrorFreeTime, oddFreeIntervals]);
+    /** Check if a slot overlaps any interval in the given day's array. */
+    function overlapsAnyInterval(slotStart, slotEnd, dayIntervals) {
+        if (!dayIntervals) return false;
+        // Support both legacy single-object and new array format
+        const arr = Array.isArray(dayIntervals) ? dayIntervals : [dayIntervals];
+        for (const fi of arr) {
+            if (Math.max(slotStart, fi.from * 60) < Math.min(slotEnd, fi.to * 60)) return true;
+        }
+        return false;
+    }
 
-    useEffect(() => {
-        setHasGenerated(false);
-        setConflictPairs([]);
-        setConflictKeys(new Set());
-        setSchedules([]);
-        setSkippedKeys([]);
-    }, [selectedSubjects, selectedPairIdx, oddFreeIntervals, evenFreeIntervals, preferredGroup]);
+    function checkUserConstraints(schedule, c) {
+        const oddIntervals = c.oddFreeIntervals || {};
+        const evenIntervals = c.evenFreeIntervals || {};
 
-    const toggle = (key) => {
-        setSelectedSubjects(prev => {
-            const next = new Set(prev);
-            next.has(key) ? next.delete(key) : next.add(key);
-            return next;
-        });
-    };
-    const toggleType = (type) => {
-        const keysOfType = subjectKeys.filter(k => typeFromKey(k) === type);
-        const allSelected = keysOfType.every(k => selectedSubjects.has(k));
-        setSelectedSubjects(prev => {
-            const next = new Set(prev);
-            keysOfType.forEach(k => allSelected ? next.delete(k) : next.add(k));
-            return next;
-        });
-    };
+        for (const s of schedule) {
+            const freq = s.frequency || 'weekly';
+            const slotStart = toMinutes(s.start);
+            const slotEnd = toMinutes(s.end);
 
-    // ── Settings export / import ──
-    const exportSettings = useCallback(() => {
-        const data = {
-            selectedSubjects: [...selectedSubjects],
-            preferredGroup,
-            selectedPairIdx,
-            oddFreeIntervals,
-            evenFreeIntervals,
-            mirrorFreeTime,
-        };
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'scheduler-settings.json'; a.click();
-        URL.revokeObjectURL(url);
-    }, [selectedSubjects, preferredGroup, selectedPairIdx, oddFreeIntervals, evenFreeIntervals]);
+            if (freq === 'odd' || freq === 'weekly') {
+                if (overlapsAnyInterval(slotStart, slotEnd, oddIntervals[s.day])) return false;
+            }
+            if (freq === 'even' || freq === 'weekly') {
+                if (overlapsAnyInterval(slotStart, slotEnd, evenIntervals[s.day])) return false;
+            }
+        }
+        return true;
+    }
 
-    const importSettings = useCallback(() => {
-        const input = document.createElement('input');
-        input.type = 'file'; input.accept = '.json';
-        input.onchange = (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = (ev) => {
-                try {
-                    const data = JSON.parse(ev.target.result);
-                    if (data.selectedSubjects) setSelectedSubjects(new Set(data.selectedSubjects));
-                    if (data.preferredGroup) setPreferredGroup(data.preferredGroup);
-                    if (data.selectedPairIdx != null) setSelectedPairIdx(data.selectedPairIdx);
-                    if (data.oddFreeIntervals) setOddFreeIntervals(data.oddFreeIntervals);
-                    if (data.evenFreeIntervals) setEvenFreeIntervals(data.evenFreeIntervals);
-                    if (data.mirrorFreeTime != null) setMirrorFreeTime(data.mirrorFreeTime);
-                    // Legacy: migrate old single freeIntervals
-                    if (data.freeIntervals && !data.oddFreeIntervals) {
-                        setOddFreeIntervals(data.freeIntervals);
-                        setEvenFreeIntervals(data.freeIntervals);
-                    }
-                } catch { /* ignore bad files */ }
-            };
-            reader.readAsText(file);
-        };
-        input.click();
-    }, []);
+    backtrack(0, []);
 
-    const handleGenerate = () => {
-        setBusy(true);
-        setHasGenerated(true);
-        setTimeout(() => {
-            const sel = Array.from(selectedSubjects);
-            const constraints = { oddFreeIntervals, evenFreeIntervals };
-
-            const { pairs, involved } = findHardConflicts(sel, grouped, oddWeek, evenWeek);
-            setConflictPairs(pairs);
-            setConflictKeys(involved);
-
-            const { schedules: res, skipped, totalFound: tf } =
-                generateSchedules(sel, grouped, constraints, oddWeek, evenWeek, preferredGroup);
-            setSchedules(res);
-            setSkippedKeys(skipped);
-            setTotalFound(tf || res.length);
-            setSchedIdx(0);
-            setBusy(false);
-        }, 50);
-    };
-
-    // Full semester schedule for the selected option
-    const fullSchedule = schedules[schedIdx] || [];
-    // Filtered per-week views
-    const oddEvents = useMemo(() => getVisibleSlots(fullSchedule, oddWeek), [fullSchedule, oddWeek]);
-    const evenEvents = useMemo(() => getVisibleSlots(fullSchedule, evenWeek), [fullSchedule, evenWeek]);
-    const oddLayout = useMemo(() => computeOverlapLayout(oddEvents), [oddEvents]);
-    const evenLayout = useMemo(() => computeOverlapLayout(evenEvents), [evenEvents]);
-
-    const prefMatchCount = useMemo(() => {
-        if (!preferredGroup || preferredGroup === 'Any') return null;
+    if (preferredGroup && preferredGroup !== 'Any') {
         const pg = preferredGroup.toLowerCase();
         const pgBase = pg.replace(/[a-z]$/, '');
-        let exact = 0, partial = 0, total = 0;
-        for (const s of fullSchedule) {
-            if (!s.group_id) continue;
-            total++;
-            const gid = s.group_id.toLowerCase();
-            if (gid === pg) exact++;
-            else if (gid.startsWith(pgBase) || pgBase.startsWith(gid)) partial++;
-        }
-        return { exact, partial, total };
-    }, [fullSchedule, preferredGroup]);
+        allResults.sort((a, b) => scorePreference(b, pg, pgBase) - scorePreference(a, pg, pgBase));
+    }
 
-    const isTypeFullySelected = (type) => {
-        const k = subjectKeys.filter(k => typeFromKey(k) === type);
-        return k.length > 0 && k.every(k => selectedSubjects.has(k));
-    };
-    const isTypePartiallySelected = (type) => {
-        const k = subjectKeys.filter(k => typeFromKey(k) === type);
-        return k.some(k => selectedSubjects.has(k)) && !k.every(k => selectedSubjects.has(k));
-    };
-
-    /* ─────────────────────────────── JSX ─────────────────────────── */
-
-    return (
-        <div className="flex h-screen bg-gray-100 overflow-hidden font-sans text-gray-800">
-            {/* ───── Sidebar ───── */}
-            <aside className="w-80 min-w-[300px] bg-white border-r border-gray-200 flex flex-col shadow-lg z-10">
-                <div className="px-5 py-4 border-b border-gray-100">
-                    <h1 className="text-xl font-bold text-indigo-600 flex items-center gap-2">
-                        <CalendarDays className="w-5 h-5" /> Scheduler
-                    </h1>
-                    <p className="text-xs text-gray-500 mt-0.5">Two-week paired view</p>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                    {/* Week Pair Selector */}
-                    <div className="space-y-1">
-                        <label className="text-sm font-semibold text-gray-700">Week Pair</label>
-                        <select value={selectedPairIdx} onChange={e => setSelectedPairIdx(+e.target.value)}
-                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition text-sm">
-                            {WEEK_PAIRS.map((p, i) => (
-                                <option key={i} value={i}>
-                                    Weeks {p.oddWeek}–{p.evenWeek} (Odd/Even)
-                                    {p.oddWeek === autoPair.oddWeek ? ' ← current' : ''}
-                                </option>
-                            ))}
-                        </select>
-                        <div className="flex items-center gap-2 text-[10px] mt-0.5">
-                            <span className="px-2 py-0.5 rounded-full font-bold bg-violet-100 text-violet-700">
-                                W{oddWeek} Odd
-                            </span>
-                            <span className="text-gray-300">+</span>
-                            <span className="px-2 py-0.5 rounded-full font-bold bg-teal-100 text-teal-700">
-                                W{evenWeek} Even
-                            </span>
-                            <span className="text-gray-400 ml-auto">
-                                {oddWeek <= 7 ? 'First half' : 'Second half'}
-                            </span>
-                        </div>
-                    </div>
-
-                    {/* Preferred Group */}
-                    <div className="space-y-1">
-                        <label className="text-sm font-semibold text-gray-700 flex items-center gap-2">
-                            <Users className="w-4 h-4" /> Preferred Group
-                        </label>
-                        <select value={preferredGroup} onChange={e => setPreferredGroup(e.target.value)}
-                            className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition text-sm">
-                            <option value="Any">Any (no preference)</option>
-                            {uniqueGroups.map(g => (<option key={g} value={g}>Group {g}</option>))}
-                        </select>
-                    </div>
-
-                    {/* Quick Select */}
-                    <div>
-                        <label className="text-sm font-semibold text-gray-700 mb-1.5 block">Quick Select</label>
-                        <div className="flex flex-wrap gap-1.5">
-                            <button onClick={() => setSelectedSubjects(new Set(subjectKeys))}
-                                className="px-3 py-1 text-xs font-semibold rounded-full border border-gray-300 bg-gray-100 hover:bg-gray-200 transition">All</button>
-                            <button onClick={() => setSelectedSubjects(new Set())}
-                                className="px-3 py-1 text-xs font-semibold rounded-full border border-gray-300 bg-gray-100 hover:bg-gray-200 transition">None</button>
-                            {allTypes.map(type => {
-                                const full = isTypeFullySelected(type);
-                                const partial = isTypePartiallySelected(type);
-                                return (
-                                    <button key={type} onClick={() => toggleType(type)}
-                                        className={`px-3 py-1 text-xs font-semibold rounded-full border transition capitalize
-                                                ${full ? 'bg-indigo-600 text-white border-indigo-600'
-                                                : partial ? 'bg-indigo-100 text-indigo-700 border-indigo-300'
-                                                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>
-                                        {type}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    </div>
-
-                    {/* Subjects */}
-                    <div>
-                        <label className="text-sm font-semibold text-gray-700 mb-1.5 block">Subjects</label>
-                        <div className="space-y-0.5 border rounded-lg p-2 max-h-36 overflow-y-auto bg-gray-50">
-                            {subjectKeys.map(k => {
-                                const unavailable = availability[k] === 0;
-                                const isConflict = conflictKeys.has(k);
-                                return (
-                                    <label key={k}
-                                        className={`flex items-center gap-2 cursor-pointer p-1 rounded text-sm
-                                               ${unavailable ? 'opacity-60' : 'hover:bg-gray-100'}
-                                               ${isConflict && !unavailable ? 'bg-red-50' : ''}`}>
-                                        <input type="checkbox" checked={selectedSubjects.has(k)} onChange={() => toggle(k)}
-                                            className="w-3.5 h-3.5 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500 flex-shrink-0" />
-                                        <span className={`truncate flex-1 text-[13px]
-                                            ${unavailable ? 'line-through text-red-400' : isConflict ? 'text-red-600 font-medium' : 'text-gray-700'}`}>
-                                            {k}
-                                        </span>
-                                        {unavailable && <span className="text-[9px] font-bold text-red-500 bg-red-100 px-1.5 py-0.5 rounded flex-shrink-0">N/A</span>}
-                                        {isConflict && !unavailable && <span className="text-[9px] font-bold text-red-600 bg-red-100 px-1.5 py-0.5 rounded flex-shrink-0">CONFLICT</span>}
-                                    </label>
-                                );
-                            })}
-                        </div>
-                    </div>
-
-                    {/* ──── Dual Free Time ──── */}
-                    <div className="space-y-3">
-                        <label className="text-sm font-semibold text-gray-700 flex items-center gap-2">
-                            <Clock className="w-4 h-4" /> Free Time
-                        </label>
-                        <FreeTimePanel
-                            label={`Week ${oddWeek} (Odd)`}
-                            color="text-violet-700"
-                            intervals={oddFreeIntervals}
-                            setIntervals={setOddFreeIntervals}
-                        />
-                        <label className="flex items-center gap-2 cursor-pointer py-1">
-                            <input type="checkbox" checked={mirrorFreeTime}
-                                onChange={e => setMirrorFreeTime(e.target.checked)}
-                                className="w-3.5 h-3.5 text-teal-600 rounded border-gray-300 focus:ring-teal-500" />
-                            <span className="text-[11px] text-gray-600">Mirror odd week settings</span>
-                        </label>
-                        <div className={mirrorFreeTime ? 'opacity-40 pointer-events-none' : ''}>
-                            <FreeTimePanel
-                                label={`Week ${evenWeek} (Even)`}
-                                color="text-teal-700"
-                                intervals={evenFreeIntervals}
-                                setIntervals={setEvenFreeIntervals}
-                            />
-                        </div>
-                    </div>
-                </div>
-
-                {/* Generate + feedback + export/import */}
-                <div className="p-4 border-t border-gray-100 bg-gray-50 space-y-2">
-                    <button onClick={handleGenerate} disabled={busy}
-                        className={`w-full py-2.5 px-4 rounded-xl text-white font-semibold shadow-md transition-all text-sm
-                                ${busy ? 'bg-indigo-400 cursor-not-allowed'
-                                : 'bg-indigo-600 hover:bg-indigo-700 hover:shadow-lg active:scale-95'}`}>
-                        {busy ? 'Optimizing…' : 'Generate Schedules'}
-                    </button>
-
-                    {hasGenerated && !busy && schedules.length > 0 && (
-                        <div className="text-center space-y-0.5">
-                            <p className="text-xs text-green-600 font-medium">
-                                ✓ Top {schedules.length} of {totalFound} distinct
-                            </p>
-                            {prefMatchCount && prefMatchCount.total > 0 && (
-                                <p className="text-[10px] text-indigo-500">
-                                    Group: {prefMatchCount.exact}/{prefMatchCount.total} exact
-                                </p>
-                            )}
-                        </div>
-                    )}
-
-                    {hasGenerated && !busy && schedules.length === 0 && (
-                        <div className="text-xs text-red-600 bg-red-50 rounded-lg p-3 space-y-1">
-                            <div className="flex items-center gap-1 font-semibold">
-                                <AlertTriangle className="w-3.5 h-3.5" /> No valid schedules
-                            </div>
-                            {conflictPairs.length > 0 ? (
-                                <div className="text-[11px] space-y-0.5">
-                                    {conflictPairs.map((p, i) => (
-                                        <p key={i} className="pl-2">⚡ <b>{p.a}</b> ↔ <b>{p.b}</b></p>
-                                    ))}
-                                    <p className="text-red-500">Deselect one from each pair.</p>
-                                </div>
-                            ) : (
-                                <p className="text-[11px]">Adjust free time or deselect subjects.</p>
-                            )}
-                        </div>
-                    )}
-
-                    {skippedKeys.length > 0 && !busy && (
-                        <p className="text-center text-[10px] text-amber-600">
-                            ⚠ Skipped {skippedKeys.length} (no slots this pair)
-                        </p>
-                    )}
-
-                    {!hasGenerated && !busy && (
-                        <p className="text-center text-xs text-gray-400">Ready to generate</p>
-                    )}
-
-                    <div className="flex gap-2 pt-1">
-                        <button onClick={exportSettings}
-                            className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg border border-gray-300 text-xs font-medium text-gray-600 hover:bg-gray-100 transition">
-                            <Download className="w-3.5 h-3.5" /> Export
-                        </button>
-                        <button onClick={importSettings}
-                            className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg border border-gray-300 text-xs font-medium text-gray-600 hover:bg-gray-100 transition">
-                            <Upload className="w-3.5 h-3.5" /> Import
-                        </button>
-                    </div>
-                </div>
-            </aside>
-
-            {/* ───── Main area — dual calendar ───── */}
-            <main className="flex-1 flex flex-col h-full bg-gray-50/50">
-                {/* Top bar */}
-                <div className="h-12 bg-white border-b border-gray-200 flex justify-between items-center px-6 shadow-sm flex-shrink-0">
-                    <div className="flex items-center gap-3">
-                        <span className="text-sm font-medium">
-                            {schedules.length > 0
-                                ? `Option ${schedIdx + 1} / ${schedules.length}`
-                                : 'Schedule Visualizer'}
-                        </span>
-                        {schedules.length > 0 && (
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${schedIdx < 10
-                                ? 'bg-emerald-100 text-emerald-700'
-                                : 'bg-gray-100 text-gray-500'
-                                }`}>
-                                {schedIdx < 10 ? '⭐ Top 10' : 'Other'}
-                            </span>
-                        )}
-                    </div>
-                    <div className="flex gap-2">
-                        <button onClick={() => setSchedIdx(i => Math.max(0, i - 1))}
-                            disabled={!schedules.length || schedIdx === 0}
-                            className="p-1.5 rounded-lg border border-gray-300 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition">
-                            <ChevronLeft className="w-4 h-4" />
-                        </button>
-                        <button onClick={() => setSchedIdx(i => Math.min(schedules.length - 1, i + 1))}
-                            disabled={!schedules.length || schedIdx === schedules.length - 1}
-                            className="p-1.5 rounded-lg border border-gray-300 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed transition">
-                            <ChevronRight className="w-4 h-4" />
-                        </button>
-                    </div>
-                </div>
-
-                {/* Dual grids */}
-                <div className="flex-1 overflow-auto p-4 space-y-4">
-                    <CalendarGrid
-                        events={oddEvents}
-                        overlapLayout={oddLayout}
-                        freeIntervals={oddFreeIntervals}
-                        weekLabel={`Week ${oddWeek} — Odd`}
-                        weekType="odd"
-                        preferredGroup={preferredGroup}
-                        accentColor="bg-violet-50 text-violet-700 border-violet-200"
-                    />
-                    <CalendarGrid
-                        events={evenEvents}
-                        overlapLayout={evenLayout}
-                        freeIntervals={evenFreeIntervals}
-                        weekLabel={`Week ${evenWeek} — Even`}
-                        weekType="even"
-                        preferredGroup={preferredGroup}
-                        accentColor="bg-teal-50 text-teal-700 border-teal-200"
-                    />
-                </div>
-            </main>
-        </div>
-    );
+    const totalFound = allResults.length;
+    return { schedules: allResults, skipped, totalFound };
 }
 
-export default App;
+function scorePreference(schedule, pg, pgBase) {
+    let score = 0;
+    for (const slot of schedule) {
+        if (!slot.group_id) continue;
+        const gid = slot.group_id.toLowerCase();
+        if (gid === pg) score += 2;
+        else if (gid.startsWith(pgBase) || pgBase.startsWith(gid)) score += 1;
+    }
+    return score;
+}
+
+// ─── Overlap layout ──────────────────────────────────────────────
+
+export function computeOverlapLayout(events) {
+    const result = new Array(events.length);
+    const byDay = {};
+    events.forEach((evt, idx) => {
+        if (!byDay[evt.day]) byDay[evt.day] = [];
+        byDay[evt.day].push(idx);
+    });
+
+    Object.values(byDay).forEach(indices => {
+        indices.sort((a, b) => {
+            const sa = toMinutes(events[a].start), sb = toMinutes(events[b].start);
+            return sa !== sb ? sa - sb : toMinutes(events[a].end) - toMinutes(events[b].end);
+        });
+        const columns = [], colAssign = {};
+        indices.forEach(idx => {
+            const s = toMinutes(events[idx].start);
+            let placed = false;
+            for (let c = 0; c < columns.length; c++) {
+                if (columns[c] <= s) { columns[c] = toMinutes(events[idx].end); colAssign[idx] = c; placed = true; break; }
+            }
+            if (!placed) { colAssign[idx] = columns.length; columns.push(toMinutes(events[idx].end)); }
+        });
+        const groups = [], visited = new Set();
+        for (let i = 0; i < indices.length; i++) {
+            const ii = indices[i];
+            if (visited.has(ii)) continue;
+            const grp = [ii]; visited.add(ii);
+            let maxEnd = toMinutes(events[ii].end);
+            for (let j = i + 1; j < indices.length; j++) {
+                const jj = indices[j];
+                if (visited.has(jj)) continue;
+                if (toMinutes(events[jj].start) < maxEnd) { grp.push(jj); visited.add(jj); maxEnd = Math.max(maxEnd, toMinutes(events[jj].end)); }
+            }
+            groups.push(grp);
+        }
+        groups.forEach(grp => {
+            const totalCols = Math.max(...grp.map(idx => colAssign[idx])) + 1;
+            grp.forEach(idx => { result[idx] = { col: colAssign[idx], totalCols }; });
+        });
+    });
+    for (let i = 0; i < events.length; i++) {
+        if (!result[i]) result[i] = { col: 0, totalCols: 1 };
+    }
+    return result;
+}
