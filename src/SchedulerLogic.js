@@ -213,24 +213,31 @@ export function generateSchedules(selectedKeys, groupedData, constraints, oddWee
         }
     }
 
+    /** Check if a slot overlaps any interval in the given day's array. */
+    function overlapsAnyInterval(slotStart, slotEnd, dayIntervals) {
+        if (!dayIntervals) return false;
+        // Support both legacy single-object and new array format
+        const arr = Array.isArray(dayIntervals) ? dayIntervals : [dayIntervals];
+        for (const fi of arr) {
+            if (Math.max(slotStart, fi.from) < Math.min(slotEnd, fi.to)) return true;
+        }
+        return false;
+    }
+
     function checkUserConstraints(schedule, c) {
         const oddIntervals = c.oddFreeIntervals || {};
         const evenIntervals = c.evenFreeIntervals || {};
 
         for (const s of schedule) {
             const freq = s.frequency || 'weekly';
-            const slotStart = toMinutes(s.start);
-            const slotEnd = toMinutes(s.end);
+            const slotStart = s.start;  // hour integer, e.g. 8
+            const slotEnd = s.end;    // hour integer, e.g. 14
 
-            // Check odd-week free time (applies to "odd" and "weekly" slots)
             if (freq === 'odd' || freq === 'weekly') {
-                const fi = oddIntervals[s.day];
-                if (fi && Math.max(slotStart, fi.from * 60) < Math.min(slotEnd, fi.to * 60)) return false;
+                if (overlapsAnyInterval(slotStart, slotEnd, oddIntervals[s.day])) return false;
             }
-            // Check even-week free time (applies to "even" and "weekly" slots)
             if (freq === 'even' || freq === 'weekly') {
-                const fi = evenIntervals[s.day];
-                if (fi && Math.max(slotStart, fi.from * 60) < Math.min(slotEnd, fi.to * 60)) return false;
+                if (overlapsAnyInterval(slotStart, slotEnd, evenIntervals[s.day])) return false;
             }
         }
         return true;
