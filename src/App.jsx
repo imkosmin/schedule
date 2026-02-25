@@ -276,7 +276,21 @@ function App() {
     const [oddFreeIntervals, setOddFreeIntervals] = useState({});
     const [evenFreeIntervals, setEvenFreeIntervals] = useState({});
     const [mirrorFreeTime, setMirrorFreeTime] = useState(true);
-    const [darkMode, setDarkMode] = useState(() => localStorage.getItem('darkMode') === 'true');
+    const [darkMode, setDarkMode] = useState(() => {
+        const saved = localStorage.getItem('darkMode');
+        if (saved !== null) return saved === 'true';
+        return window.matchMedia('(prefers-color-scheme: dark)').matches;
+    });
+
+    // Follow OS theme changes unless the user has manually toggled
+    useEffect(() => {
+        const mq = window.matchMedia('(prefers-color-scheme: dark)');
+        const handler = (e) => {
+            if (localStorage.getItem('darkMode') === null) setDarkMode(e.matches);
+        };
+        mq.addEventListener('change', handler);
+        return () => mq.removeEventListener('change', handler);
+    }, []);
     const [schedules, setSchedules] = useState([]);
     const [skippedKeys, setSkippedKeys] = useState([]);
     const [conflictPairs, setConflictPairs] = useState([]);
