@@ -12,7 +12,7 @@ import {
     findHardConflicts,
     getCurrentWeekInfo,
 } from './SchedulerLogic';
-import { ChevronLeft, ChevronRight, CalendarDays, AlertTriangle, Users, Clock, X, Download, Upload } from 'lucide-react';
+import { ChevronLeft, ChevronRight, CalendarDays, AlertTriangle, Users, Clock, X, Download, Upload, Moon, Sun } from 'lucide-react';
 
 /* ── Constants ─────────────────────────────────────────────────── */
 
@@ -276,6 +276,7 @@ function App() {
     const [oddFreeIntervals, setOddFreeIntervals] = useState({});
     const [evenFreeIntervals, setEvenFreeIntervals] = useState({});
     const [mirrorFreeTime, setMirrorFreeTime] = useState(true);
+    const [darkMode, setDarkMode] = useState(() => localStorage.getItem('darkMode') === 'true');
     const [schedules, setSchedules] = useState([]);
     const [skippedKeys, setSkippedKeys] = useState([]);
     const [conflictPairs, setConflictPairs] = useState([]);
@@ -460,13 +461,21 @@ function App() {
     /* ─────────────────────────────── JSX ─────────────────────────── */
 
     return (
-        <div className="flex h-screen bg-gray-100 overflow-hidden font-sans text-gray-800">
+        <div className={`flex h-screen bg-gray-100 overflow-hidden font-sans text-gray-800 ${darkMode ? 'dark' : ''}`}>
             {/* ───── Sidebar ───── */}
             <aside className="w-80 min-w-[300px] bg-white border-r border-gray-200 flex flex-col shadow-lg z-10">
                 <div className="px-5 py-4 border-b border-gray-100">
-                    <h1 className="text-xl font-bold text-indigo-600 flex items-center gap-2">
-                        <CalendarDays className="w-5 h-5" /> Scheduler
-                    </h1>
+                    <div className="flex items-center justify-between">
+                        <h1 className="text-xl font-bold text-indigo-600 flex items-center gap-2">
+                            <CalendarDays className="w-5 h-5" /> Scheduler
+                        </h1>
+                        <button
+                            onClick={() => { setDarkMode(d => { const v = !d; localStorage.setItem('darkMode', v); return v; }); }}
+                            className="p-1.5 rounded-lg border border-gray-300 hover:bg-gray-100 transition"
+                            title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
+                            {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-gray-500" />}
+                        </button>
+                    </div>
                     <p className="text-xs text-gray-500 mt-0.5">Two-week paired view</p>
                 </div>
 
