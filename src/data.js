@@ -128,7 +128,6 @@ export const universitySchedule = [
 
     { subject: "PAOO", type: "lab", day: "Joi", start: 16, end: 18, room: "G407", group_id: "32a", frequency: "odd" },
     { subject: "PLF", type: "lab", day: "Joi", start: 16, end: 18, room: "G408", group_id: "32b", frequency: "odd" },
-    ,
     { subject: "PAOO", type: "lab", day: "Joi", start: 16, end: 18, room: "G407", group_id: "33", frequency: "even" },
 
     // 18:00
