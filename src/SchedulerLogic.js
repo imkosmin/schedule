@@ -194,7 +194,8 @@ export function generateSchedules(selectedKeys, groupedData, constraints, oddWee
 
     function backtrack(idx, current) {
         if (idx === buckets.length) {
-            if (!checkUserConstraints(current, constraints)) return;
+            const pass = checkUserConstraints(current, constraints);
+            if (!pass) return;
             const fp = scheduleFingerprint(current);
             if (seenFingerprints.has(fp)) return;
             seenFingerprints.add(fp);
