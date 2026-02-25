@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { universitySchedule } from './data';
 import {
     groupDataBySubject,
@@ -276,12 +276,6 @@ function App() {
     const [oddFreeIntervals, setOddFreeIntervals] = useState({});
     const [evenFreeIntervals, setEvenFreeIntervals] = useState({});
     const [mirrorFreeTime, setMirrorFreeTime] = useState(true);
-
-    // Refs to guarantee handleGenerate always reads the latest free-time values
-    const oddFreeRef = useRef(oddFreeIntervals);
-    const evenFreeRef = useRef(evenFreeIntervals);
-    useEffect(() => { oddFreeRef.current = oddFreeIntervals; }, [oddFreeIntervals]);
-    useEffect(() => { evenFreeRef.current = evenFreeIntervals; }, [evenFreeIntervals]);
     const [schedules, setSchedules] = useState([]);
     const [skippedKeys, setSkippedKeys] = useState([]);
     const [conflictPairs, setConflictPairs] = useState([]);
@@ -399,31 +393,37 @@ function App() {
         input.click();
     }, []);
 
+    // ── Schedule generation (effect-driven to guarantee fresh state) ──
+    const [generateTrigger, setGenerateTrigger] = useState(0);
+
     const handleGenerate = () => {
         setBusy(true);
         setHasGenerated(true);
-        setTimeout(() => {
-            const sel = Array.from(selectedSubjects);
-            // Read from refs to guarantee we always have the latest values
-            const constraints = {
-                oddFreeIntervals: oddFreeRef.current,
-                evenFreeIntervals: evenFreeRef.current,
-            };
-            console.log('[Generate] constraints used:', JSON.stringify(constraints));
-
-            const { pairs, involved } = findHardConflicts(sel, grouped, oddWeek, evenWeek);
-            setConflictPairs(pairs);
-            setConflictKeys(involved);
-
-            const { schedules: res, skipped, totalFound: tf } =
-                generateSchedules(sel, grouped, constraints, oddWeek, evenWeek, preferredGroup);
-            setSchedules(res);
-            setSkippedKeys(skipped);
-            setTotalFound(tf || res.length);
-            setSchedIdx(0);
-            setBusy(false);
-        }, 50);
+        setGenerateTrigger(prev => prev + 1);
     };
+
+    useEffect(() => {
+        if (generateTrigger === 0) return; // Skip initial mount
+
+        // This effect always runs AFTER the latest render,
+        // so oddFreeIntervals / evenFreeIntervals are guaranteed fresh.
+        const constraints = { oddFreeIntervals, evenFreeIntervals };
+        console.log('[Generate] constraints:', JSON.stringify(constraints));
+
+        const sel = Array.from(selectedSubjects);
+        const { pairs, involved } = findHardConflicts(sel, grouped, oddWeek, evenWeek);
+        setConflictPairs(pairs);
+        setConflictKeys(involved);
+
+        const { schedules: res, skipped, totalFound: tf } =
+            generateSchedules(sel, grouped, constraints, oddWeek, evenWeek, preferredGroup);
+        setSchedules(res);
+        setSkippedKeys(skipped);
+        setTotalFound(tf || res.length);
+        setSchedIdx(0);
+        setBusy(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [generateTrigger]);
 
     // Full semester schedule for the selected option
     const fullSchedule = schedules[schedIdx] || [];
